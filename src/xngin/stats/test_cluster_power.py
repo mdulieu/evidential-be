@@ -13,6 +13,7 @@ from xngin.stats.cluster_power import (
     calculate_design_effect,
     calculate_effective_sample_size,
     calculate_num_clusters_needed,
+    solve_for_mde_cluster,
     solve_for_mde_cluster_impl,
     solve_for_sample_size_cluster,
 )
@@ -704,3 +705,78 @@ def test_solve_for_sample_size_cluster_cv_warning_message(cv: float, expected_wa
         assert expected_warning in result.msg.msg
     else:
         assert "Warning:" not in result.msg.msg
+
+
+def test_solve_for_mde_cluster_plumbs_math_through():
+    """The wrapper's target_possible/pct_change_possible should equal what the _impl returns."""
+    metric = DesignSpecMetric(
+        field_name="reading_score",
+        metric_type=MetricType.NUMERIC,
+        metric_baseline=100,
+        metric_stddev=20,
+        icc=0.15,
+        avg_cluster_size=30,
+        cv=0.0,
+    )
+
+    expected_target, expected_pct = solve_for_mde_cluster_impl(
+        metric=metric,
+        desired_n=600,
+        n_arms=2,
+    )
+
+    result = solve_for_mde_cluster(metric=metric, desired_n=600, n_arms=2)
+
+    assert result.target_possible == pytest.approx(expected_target)
+    assert result.pct_change_possible == pytest.approx(expected_pct)
+
+
+def test_solve_for_mde_cluster_response_shape():
+    """The wrapper should produce a MetricPowerAnalysis with MDE-mode-appropriate fields."""
+    metric = DesignSpecMetric(
+        field_name="reading_score",
+        metric_type=MetricType.NUMERIC,
+        metric_baseline=100,
+        metric_stddev=20,
+        icc=0.15,
+        avg_cluster_size=30,
+        cv=0.0,
+    )
+
+    result = solve_for_mde_cluster(metric=metric, desired_n=600, n_arms=2)
+
+    # In MDE mode, target_n echoes the user's desired_n input.
+    assert result.target_n == 600
+    # sufficient_n is meaningless in MDE mode.
+    assert result.sufficient_n is None
+    # The message should always be SUFFICIENT for MDE mode.
+    assert result.msg is not None
+    assert result.msg.type == MetricPowerAnalysisMessageType.SUFFICIENT
+
+
+def test_solve_for_mde_cluster_message_round_trip():
+    """The rendered msg should be reproducible from source_msg + values via format_map."""
+    metric = DesignSpecMetric(
+        field_name="reading_score",
+        metric_type=MetricType.NUMERIC,
+        metric_baseline=100,
+        metric_stddev=20,
+        icc=0.15,
+        avg_cluster_size=30,
+        cv=0.0,
+    )
+
+    result = solve_for_mde_cluster(metric=metric, desired_n=600, n_arms=2)
+
+    assert result.msg is not None
+    msg_values = result.msg.values  # noqa: PD011
+    assert msg_values is not None
+    assert msg_values["desired_n"] == 600
+    assert metric.metric_baseline is not None
+    assert result.target_possible is not None
+    assert msg_values["metric_baseline"] == pytest.approx(metric.metric_baseline, 4)
+    assert msg_values["target_possible"] == pytest.approx(result.target_possible, 4)
+
+    # Round-trip invariant: rendered text must reproduce from the parts.
+    assert result.msg.msg == result.msg.source_msg.format_map(msg_values)
+    assert "minimum detectable effect" in result.msg.msg.lower()
